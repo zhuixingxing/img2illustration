@@ -70,8 +70,21 @@ HTML = r"""<!DOCTYPE html>
     @media (max-width: 600px) { .compare { grid-template-columns: 1fr; } }
     .compare-col h3 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 10px; }
     .compare-col img { width: 100%; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.1); display: block; }
-    .btn-dl { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; padding: 9px 20px; background: var(--green); color: #fff; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 600; transition: background .2s; }
+    /* 操作按钮行 */
+    .action-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+    .btn-action {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 9px 18px; border-radius: 8px;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer; border: none;
+      transition: background .2s, opacity .15s;
+      text-decoration: none;
+    }
+    .btn-dl   { background: var(--green); color: #fff; }
     .btn-dl:hover { background: var(--green-dark); }
+    .btn-copy { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+    .btn-copy:hover { background: #e5e7eb; }
+    .btn-copy.copied { background: #d1fae5; color: #065f46; border-color: #6ee7b7; }
   </style>
 </head>
 <body>
@@ -138,13 +151,17 @@ HTML = r"""<!DOCTYPE html>
       <div class="compare-col">
         <h3>插画效果</h3>
         <img id="img-result" src="" alt="结果">
-        <a id="btn-dl" class="btn-dl" href="#" download="illustration.png">⬇ 下载插画</a>
+        <div class="action-row">
+          <a id="btn-dl" class="btn-action btn-dl" href="#" download="illustration.png">⬇ 下载</a>
+          <button id="btn-copy" class="btn-action btn-copy">复制图片</button>
+        </div>
       </div>
     </div>
   </div>
 </div>
 <script>
   let file = null, style = 'cartoon';
+
   document.querySelectorAll('.style-card').forEach(card => {
     card.addEventListener('click', () => {
       document.querySelectorAll('.style-card').forEach(c => c.classList.remove('active'));
@@ -152,9 +169,11 @@ HTML = r"""<!DOCTYPE html>
       style = card.dataset.style;
     });
   });
+
   const slider = document.getElementById('max-size');
   const sizeNum = document.getElementById('size-num');
   slider.addEventListener('input', () => sizeNum.textContent = slider.value);
+
   const dropZone = document.getElementById('drop-zone');
   const fileInput = document.getElementById('file-input');
   dropZone.addEventListener('click', () => fileInput.click());
@@ -162,6 +181,7 @@ HTML = r"""<!DOCTYPE html>
   dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
   dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
   dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); setFile(e.dataTransfer.files[0]); });
+
   function setFile(f) {
     if (!f || !f.type.startsWith('image/')) return;
     file = f;
@@ -173,6 +193,7 @@ HTML = r"""<!DOCTYPE html>
     reader.onload = e => document.getElementById('img-original').src = e.target.result;
     reader.readAsDataURL(f);
   }
+
   document.getElementById('btn-convert').addEventListener('click', async () => {
     if (!file) return;
     const btn = document.getElementById('btn-convert');
@@ -181,7 +202,11 @@ HTML = r"""<!DOCTYPE html>
     const resultCard = document.getElementById('result-card');
     btn.disabled = true; btn.textContent = '处理中…';
     progress.style.display = 'block'; errorBox.style.display = 'none'; resultCard.style.display = 'none';
-    const steps = { cartoon:['平滑色彩…','色彩海报化…','提取轮廓…','合成中…'], sketch:['转灰度…','颜色减淡混合…','调整对比度…'], watercolor:['软化色彩…','添加纹理…','柔化轮廓…','合成中…'] };
+    const steps = {
+      cartoon:    ['平滑色彩…','色彩海报化…','提取轮廓…','合成中…'],
+      sketch:     ['转灰度…','颜色减淡混合…','调整对比度…'],
+      watercolor: ['软化色彩…','添加纹理…','柔化轮廓…','合成中…']
+    };
     const label = document.getElementById('progress-label');
     let si = 0;
     const timer = setInterval(() => { const list = steps[style]||['处理中…']; label.textContent = list[si++ % list.length]; }, 900);
@@ -194,6 +219,10 @@ HTML = r"""<!DOCTYPE html>
       document.getElementById('img-result').src = data.image;
       document.getElementById('btn-dl').href = data.image;
       document.getElementById('btn-dl').download = `illustration_${style}.png`;
+      // 重置复制按钮状态
+      const copyBtn = document.getElementById('btn-copy');
+      copyBtn.textContent = '复制图片';
+      copyBtn.classList.remove('copied');
       resultCard.style.display = 'block';
       resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {
@@ -203,6 +232,36 @@ HTML = r"""<!DOCTYPE html>
       clearInterval(timer);
       btn.disabled = false; btn.textContent = '重新转换';
       progress.style.display = 'none';
+    }
+  });
+
+  // 复制图片到剪贴板
+  document.getElementById('btn-copy').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-copy');
+    const imgSrc = document.getElementById('img-result').src;
+    if (!imgSrc || imgSrc === window.location.href) return;
+    try {
+      const resp = await fetch(imgSrc);
+      const blob = await resp.blob();
+      // 确保是 PNG（Clipboard API 要求）
+      let pngBlob = blob;
+      if (blob.type !== 'image/png') {
+        const bmp = await createImageBitmap(blob);
+        const canvas = document.createElement('canvas');
+        canvas.width = bmp.width; canvas.height = bmp.height;
+        canvas.getContext('2d').drawImage(bmp, 0, 0);
+        pngBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+      }
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': pngBlob })
+      ]);
+      btn.textContent = '✅ 已复制';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = '复制图片'; btn.classList.remove('copied'); }, 2500);
+    } catch (e) {
+      // 降级：弹出提示让用户手动右键保存
+      btn.textContent = '请右键图片另存为';
+      setTimeout(() => { btn.textContent = '复制图片'; }, 2500);
     }
   });
 </script>
@@ -220,17 +279,14 @@ def convert():
     f = request.files.get('image')
     if not f:
         return jsonify({'error': '未收到图片文件'}), 400
-
     style = request.form.get('style', 'cartoon')
     if style not in STYLES:
         return jsonify({'error': f'不支持的风格: {style}'}), 400
-
     try:
         max_size = int(request.form.get('max_size', 1024))
         max_size = max(64, min(max_size, 4096))
     except ValueError:
         max_size = 1024
-
     try:
         img = Image.open(f.stream)
         result = process_image(img, style=style, max_size=max_size)
