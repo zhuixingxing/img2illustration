@@ -10,12 +10,12 @@ CLI 用法:
 """
 
 import numpy as np
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageOps
 import sys, os, argparse
 
 
 # ══════════════════════════════════════════════════════════════
-#  基础卷积与模糊（可分离高斯，无第三方依赖）
+#  基础卷积与模糊（可分离高斯）
 # ══════════════════════════════════════════════════════════════
 
 def _gaussian_kernel_1d(sigma: float) -> np.ndarray:
@@ -27,7 +27,6 @@ def _gaussian_kernel_1d(sigma: float) -> np.ndarray:
 
 
 def _convolve_rows(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    """沿行方向做 1D 卷积（向量化）"""
     k = len(kernel) // 2
     padded = np.pad(arr, ((0, 0), (k, k)), mode='edge')
     out = np.zeros(arr.shape, dtype=np.float32)
@@ -66,17 +65,14 @@ def _apply_3x3(ch: np.ndarray, kern: np.ndarray) -> np.ndarray:
 
 
 def sobel_edges(img: np.ndarray) -> np.ndarray:
-    """Sobel 边缘检测，返回 [0,1] 强度图（H×W）"""
     if img.ndim == 3:
         gray = (0.299 * img[:, :, 0] +
                 0.587 * img[:, :, 1] +
                 0.114 * img[:, :, 2]).astype(np.float32)
     else:
         gray = img.astype(np.float32)
-
     kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
     ky = kx.T
-
     mag = np.sqrt(_apply_3x3(gray, kx) ** 2 + _apply_3x3(gray, ky) ** 2)
     mag /= mag.max() + 1e-8
     return mag
@@ -101,26 +97,33 @@ def adjust_contrast(img: np.ndarray, factor: float) -> np.ndarray:
 
 # ══════════════════════════════════════════════════════════════
 #  风格一：卡通插画
+#  修正：轮廓过黑 → 提高边缘阈值 + 降低压暗强度
 # ══════════════════════════════════════════════════════════════
 
 def style_cartoon(arr: np.ndarray) -> np.ndarray:
+    # 平滑
     smooth = arr.astype(np.float32)
     for _ in range(4):
         smooth = gaussian_blur(smooth, sigma=2.5)
-    flat = posterize(smooth, levels=7)
-    flat = adjust_saturation(flat, 1.9)
 
+    # 海报化 + 饱和度（从 1.9 降到 1.5，避免颜色过艳）
+    flat = posterize(smooth, levels=8)
+    flat = adjust_saturation(flat, 1.5)
+
+    # 边缘检测：提高阈值 0.18→0.25，减少过多暗边
     edges = sobel_edges(gaussian_blur(arr, sigma=1.0))
-    edges = np.power(edges, 0.6)
-    mask = (edges > 0.18).astype(np.float32)
-    mask = gaussian_blur(mask, sigma=0.7)
+    edges = np.power(edges, 0.7)          # 比原来 0.6 更保守
+    mask = (edges > 0.25).astype(np.float32)
+    mask = gaussian_blur(mask, sigma=0.6)
 
-    result = flat.astype(np.float32) * (1.0 - mask[:, :, np.newaxis] * 0.92)
+    # 压暗强度 0.92→0.65，边缘为深灰而非近黑
+    result = flat.astype(np.float32) * (1.0 - mask[:, :, np.newaxis] * 0.65)
     return result.clip(0, 255).astype(np.uint8)
 
 
 # ══════════════════════════════════════════════════════════════
 #  风格二：铅笔素描
+#  修正：过曝 → 增大 dodge epsilon + gamma 压暗
 # ══════════════════════════════════════════════════════════════
 
 def style_sketch(arr: np.ndarray) -> np.ndarray:
@@ -130,27 +133,37 @@ def style_sketch(arr: np.ndarray) -> np.ndarray:
 
     blurred = gaussian_blur(gray, sigma=6.0)
     inverted = 255.0 - blurred
-    s = gray / (inverted / 255.0 + 0.04)
+
+    # epsilon 0.04→0.12：降低极亮值，避免过曝
+    s = gray / (inverted / 255.0 + 0.12)
     s = s.clip(0, 255)
 
-    p5, p95 = np.percentile(s, 5), np.percentile(s, 95)
-    s = ((s - p5) / (p95 - p5 + 1e-8) * 255).clip(0, 255)
+    # gamma 压暗：让线条更清晰（^1.3 让亮区变暗）
+    s = (s / 255.0) ** 1.3 * 255.0
+
+    # 对比度拉伸（百分位收窄，避免拉到纯白）
+    p5, p90 = np.percentile(s, 5), np.percentile(s, 90)
+    s = ((s - p5) / (p90 - p5 + 1e-8) * 220).clip(0, 255)  # 上限 220 留余量
 
     return np.stack([s, s, s], axis=2).astype(np.uint8)
 
 
 # ══════════════════════════════════════════════════════════════
 #  风格三：水彩
+#  修正：饱和度过高 → 1.4→1.05，噪点轻微调低
 # ══════════════════════════════════════════════════════════════
 
 def style_watercolor(arr: np.ndarray) -> np.ndarray:
     soft = gaussian_blur(arr.astype(np.float32), sigma=3.0)
     soft = posterize(soft, levels=14)
-    soft = adjust_saturation(soft, 1.4)
+
+    # 饱和度 1.4→1.05，对比度保持 1.1
+    soft = adjust_saturation(soft, 1.05)
     soft = adjust_contrast(soft, 1.1)
 
+    # 纸张噪点强度从 7→5
     rng = np.random.default_rng(42)
-    noise = rng.normal(0, 7, soft.shape).astype(np.float32)
+    noise = rng.normal(0, 5, soft.shape).astype(np.float32)
     soft = (soft.astype(np.float32) + noise).clip(0, 255)
 
     edges = sobel_edges(arr)
@@ -176,6 +189,8 @@ STYLES = {
 def process_image(img: Image.Image, style: str = "cartoon",
                   max_size: int = 1024) -> Image.Image:
     """Web 调用入口：PIL Image → PIL Image"""
+    # 修正：根据 EXIF 旋转方向修正朝向，确保竖图输出仍为竖图
+    img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
     w, h = img.size
     if max(w, h) > max_size:
@@ -188,7 +203,6 @@ def process_image(img: Image.Image, style: str = "cartoon",
 
 def convert(input_path: str, output_path: str,
             style: str = "cartoon", max_size: int = 1024) -> None:
-    """CLI 入口：文件路径 → 文件路径"""
     img = Image.open(input_path)
     print(f"输入: {input_path}  风格: {style}")
     result = process_image(img, style=style, max_size=max_size)
